@@ -102,11 +102,10 @@ function saveUser(u) {
 }
 
 async function api(action, payload = {}) {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // evita il preflight CORS
-    body: JSON.stringify({ action, ...payload })
-  });
+  // Richiesta GET con i parametri nell'indirizzo: è il formato che Apps Script
+  // accetta senza complicazioni (niente preflight CORS, niente redirect su POST).
+  const qs = new URLSearchParams({ action, ...payload, _: Date.now() });
+  const res = await fetch(API_URL + '?' + qs, { method: 'GET', cache: 'no-store' });
   const text = await res.text();
   let data;
   try {
@@ -151,6 +150,10 @@ async function showSetup() {
     const data = await api('members');
     members = data.members;
     const sel = $('memberSelect');
+    if (!members.length) {
+      sel.innerHTML = '<option value="">— nessun socio —</option>';
+      return showMsg('L\'elenco soci è vuoto: il presidente deve inserire i nomi nella scheda "Soci" del foglio.', 'err');
+    }
     sel.innerHTML = '<option value="">— seleziona —</option>' + members.map(m =>
       `<option value="${esc(m.id)}" ${m.claimed ? 'disabled' : ''}>${esc(m.name)} (${esc(m.id)})${m.claimed ? ' – già attivato' : ''}</option>`
     ).join('');
