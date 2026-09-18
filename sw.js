@@ -1,6 +1,6 @@
 // Service worker minimo: rende l'app installabile e mette in cache solo la "scocca".
 // I dati (adesioni) arrivano sempre dalla rete, mai dalla cache.
-const CACHE = 'bowling-v1';
+const CACHE = 'bowling-v2';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {

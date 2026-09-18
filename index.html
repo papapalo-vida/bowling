@@ -65,6 +65,7 @@
       <input id="pin" inputmode="numeric" autocomplete="off">
     </div>
     <button class="btn-join" id="activateBtn">Conferma</button>
+    <div class="foot" id="apiInfo"></div>
   </section>
 
   <!-- ALLENAMENTI -->
@@ -106,9 +107,29 @@ async function api(action, payload = {}) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // evita il preflight CORS
     body: JSON.stringify({ action, ...payload })
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    // Google ha risposto con una pagina HTML invece dei dati: mostriamo di che pagina si tratta
+    console.error('Risposta non JSON da ' + API_URL, res.status, text.slice(0, 500));
+    throw new Error(diagnose_(res, text));
+  }
   if (!data.ok) throw new Error(data.error || 'Errore sconosciuto');
   return data;
+}
+
+/** Traduce in italiano la pagina HTML restituita da Google. */
+function diagnose_(res, text) {
+  const t = text.toLowerCase();
+  if (t.includes('accounts.google.com') || t.includes('sign in') || t.includes('accedi'))
+    return 'Il deployment chiede l\'accesso a Google: imposta "Chi ha accesso: Chiunque" e ripubblica.';
+  if (t.includes('script function not found'))
+    return 'La versione pubblicata è vecchia (manca doPost): Gestisci deployment → Nuova versione.';
+  if (t.includes('moved temporarily') || res.status === 404)
+    return 'URL non valido (HTTP ' + res.status + '): controlla API_URL, deve essere quello attivo e finire con /exec.';
+  return 'Risposta inattesa dal server (HTTP ' + res.status + '). Dettagli nella console del browser.';
 }
 
 function showMsg(text, kind = 'ok') {
@@ -122,6 +143,7 @@ function clearMsg() { $('msg').className = 'msg hidden'; }
 // ============ CONFIGURAZIONE UTENTE ============
 async function showSetup() {
   $('setup').classList.remove('hidden');
+  $('apiInfo').textContent = 'Server: …' + API_URL.slice(-18);
   $('trainings').innerHTML = '';
   $('footer').classList.add('hidden');
   $('who').textContent = '';
@@ -263,7 +285,7 @@ function esc(s) {
 
 // ============ AVVIO ============
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-if (API_URL.startsWith('https://script.google.com/macros/s/AKfycbyj2WBN2apOS_LwZnVCeYVAHe4AAhp-8yeF7_0_vQBgDYEfqzlOd-iaPDoJkxbXR4Jtrw/exec')) {
+if (API_URL.startsWith('INCOLLA')) {
   showMsg('App non configurata: inserire API_URL in index.html.', 'err');
 } else if (user && user.token) {
   startMain();
