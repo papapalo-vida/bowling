@@ -83,6 +83,7 @@ const REFRESH_MS = 45000;
 // Nessun dato viene salvato sul telefono: l'app è indipendente dal dispositivo.
 let members = [];      // elenco soci attivi
 let trainings = [];    // ultimo stato ricevuto dal server
+let soloAperti = true; // mostrare solo gli allenamenti con adesioni aperte (lo decide il server)
 let selectedId = '';   // socio scelto in questo momento
 let busy = false;
 let timer = null;
@@ -164,27 +165,16 @@ function showMsg(text, kind = 'ok') {
 function clearMsg() { $('msg').className = 'msg hidden'; }
 
 // ============ TENDINA SOCI ============
-async function loadMembers() {
-  const sel = $('memberSelect');
-  try {
-    const data = await api('members');
-    members = data.members;
-    if (!members.length) {
-      sel.innerHTML = '<option value="">— nessun socio —</option>';
-      return showMsg('L\'elenco soci è vuoto: il presidente deve inserire i nomi nella scheda "Soci" del foglio.', 'err');
-    }
-    fillSelect();
-  } catch (e) {
-    sel.innerHTML = '<option value="">— elenco non disponibile —</option>';
-    showMsg('Impossibile caricare l\'elenco soci: ' + e.message, 'err');
-  }
-}
-
+/** Ricostruisce la tendina solo se l'elenco è davvero cambiato. */
 function fillSelect() {
   const sel = $('memberSelect');
-  sel.innerHTML = '<option value="">— scegli il socio —</option>' + members.map(m =>
-    `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.id)})</option>`
-  ).join('');
+  const firma = members.map(m => m.id).join(',');
+  if (firma === sel.dataset.firma) { sel.value = selectedId; return; }
+  sel.dataset.firma = firma;
+  sel.innerHTML = members.length
+    ? '<option value="">— scegli il socio —</option>' + members.map(m =>
+        `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.id)})</option>`).join('')
+    : '<option value="">— nessun socio —</option>';
   sel.value = selectedId;
 }
 
@@ -209,10 +199,7 @@ $('memberSelect').addEventListener('change', () => {
 async function refresh(silenzioso) {
   if (busy) return;
   try {
-    const data = await api('status');
-    trainings = data.trainings;
-    render();
-    $('updated').textContent = 'Aggiornato alle ' + data.serverTime.slice(11);
+    applica(await api('status'));
   } catch (e) {
     console.error(e);
     if (silenzioso) $('updated').textContent = 'Aggiornamento non riuscito — premi Aggiorna';
@@ -220,13 +207,38 @@ async function refresh(silenzioso) {
   }
 }
 
+/**
+ * Prende lo stato da una qualsiasi risposta del server e aggiorna la schermata.
+ * Anche adesione e annullamento restituiscono lo stato aggiornato, quindi dopo
+ * un'operazione non serve una seconda chiamata: è metà attesa in meno.
+ */
+function applica(data) {
+  if (data.members) { members = data.members; fillSelect(); }
+  if (typeof data.showOnlyOpen === 'boolean') soloAperti = data.showOnlyOpen;
+  if (data.trainings) trainings = data.trainings;
+  if (data.serverTime) $('updated').textContent = 'Aggiornato alle ' + data.serverTime.slice(11);
+  if (data.idsMancanti) showMsg('Alcuni soci non hanno ancora un ID: il presidente deve usare il menu Bowling → Genera ID mancanti.', 'err');
+  render();
+}
+
 function render() {
   const me = selectedMember();
-  if (!trainings.length) {
-    $('trainings').innerHTML = '<div class="card">Nessun allenamento in programma.</div>';
+  const aperti = soloAperti ? trainings.filter(t => t.window === 'open') : trainings;
+
+  if (!aperti.length) {
+    // Niente di aperto: invece di una schermata vuota dico quando si apre il prossimo.
+    const prossimo = trainings.find(t => t.window === 'notYetOpen');
+    $('trainings').innerHTML = prossimo
+      ? `<div class="card">
+           <div class="date">Adesioni chiuse</div>
+           <div class="sub">Il prossimo allenamento è <strong>${esc(prossimo.weekday)} ${esc(prossimo.label)}</strong>.
+           Le adesioni si aprono il <strong>${esc(prossimo.opensAt)}</strong>.</div>
+         </div>`
+      : '<div class="card">Nessun allenamento in programma.</div>';
     return;
   }
-  $('trainings').innerHTML = trainings.map(t => {
+
+  $('trainings').innerHTML = aperti.map(t => {
     const mine = me ? t.signups.find(s => s.userId === me.id) : null;
     let action;
     if (t.window === 'notYetOpen') {
@@ -286,21 +298,20 @@ $('trainings').addEventListener('click', async ev => {
   try {
     const data = await api(joinDate ? 'signup' : 'cancel',
       { memberId: me.id, date: joinDate || cancelDate });
-    showMsg(data.message, 'ok');
     selectedId = '';           // il turno passa alla persona successiva
     $('memberSelect').value = '';
     updateWho();
+    busy = false;
+    applica(data);             // lo stato aggiornato arriva già con questa risposta
+    showMsg(data.message, 'ok');
   } catch (e) {
     showMsg('Operazione non riuscita: ' + e.message, 'err');
   } finally {
     busy = false;
     $('memberSelect').disabled = false;
-    // Ridisegno subito con i dati che ho già: così il pulsante non resta
-    // bloccato su "Invio in corso…" se l'aggiornamento successivo non riesce.
+    // Ridisegno comunque: così il pulsante non resta bloccato su "Invio in corso…"
+    // nemmeno se l'operazione è fallita.
     render();
-    // Piccola pausa prima di rileggere: due richieste attaccate una all'altra
-    // sono proprio la situazione in cui Apps Script perde la seconda.
-    setTimeout(() => refresh(true), 800);
   }
 });
 
@@ -316,8 +327,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
 if (API_URL.startsWith('INCOLLA')) {
   showMsg('App non configurata: inserire API_URL in index.html.', 'err');
 } else {
-  loadMembers();
-  refresh(false);
+  refresh(false);   // una sola chiamata: soci e allenamenti arrivano insieme
   timer = setInterval(() => { if (!document.hidden) refresh(true); }, REFRESH_MS);
 }
 </script>
