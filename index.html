@@ -78,6 +78,8 @@
 // Incolla qui l'URL della web app Apps Script (termina con /exec)
 const API_URL = 'https://script.google.com/macros/s/AKfycbyj2WBN2apOS_LwZnVCeYVAHe4AAhp-8yeF7_0_vQBgDYEfqzlOd-iaPDoJkxbXR4Jtrw/exec';
 const REFRESH_MS = 45000;
+// Deve coincidere con VERSION in Code.gs: se no, sul foglio è pubblicata un'altra versione.
+const VERSIONE_ATTESA = '2.3';
 
 // ============ STATO ============
 // Nessun dato viene salvato sul telefono: l'app è indipendente dal dispositivo.
@@ -178,6 +180,37 @@ function fillSelect() {
   sel.value = selectedId;
 }
 
+/**
+ * Rete di sicurezza: se lo script pubblicato su Google è ancora la versione vecchia,
+ * "status" non contiene l'elenco soci e la tendina resterebbe su "Caricamento…" per
+ * sempre. In quel caso li chiedo con la vecchia chiamata dedicata.
+ */
+async function assicuraSoci() {
+  if (members.length || assicuraSoci.inCorso) return;
+  assicuraSoci.inCorso = true;
+  try {
+    const data = await api('members');
+    members = data.members || [];
+    fillSelect();
+  } catch (e) {
+    console.error(e);
+    $('memberSelect').innerHTML = '<option value="">— elenco soci non disponibile —</option>';
+    showMsg('Impossibile caricare l\'elenco soci: ' + e.message, 'err');
+  } finally {
+    assicuraSoci.inCorso = false;
+  }
+}
+
+/** Detto una volta sola: il server non parla la lingua di questa versione dell'app. */
+function avvisaServerVecchio(versione) {
+  const trovata = versione || 'precedente alla 2.3';
+  if (avvisaServerVecchio.detto) return;
+  avvisaServerVecchio.detto = true;
+  console.warn('Versione pubblicata: ' + trovata + ' — attesa: ' + VERSIONE_ATTESA);
+  $('updated').textContent = 'Attenzione: sul foglio è pubblicata la versione ' + trovata +
+    ' dello script, mentre questa app richiede la ' + VERSIONE_ATTESA + ' — ripubblica il deployment.';
+}
+
 function updateWho() {
   const m = selectedMember();
   $('who').textContent = m ? `Stai operando come ${m.name} · ${m.id}` : 'Scegli il socio, poi aderisci';
@@ -214,10 +247,12 @@ async function refresh(silenzioso) {
  */
 function applica(data) {
   if (data.members) { members = data.members; fillSelect(); }
+  else if (!members.length) assicuraSoci();   // server vecchio: me li faccio dare a parte
   if (typeof data.showOnlyOpen === 'boolean') soloAperti = data.showOnlyOpen;
   if (data.trainings) trainings = data.trainings;
   if (data.serverTime) $('updated').textContent = 'Aggiornato alle ' + data.serverTime.slice(11);
   if (data.idsMancanti) showMsg('Alcuni soci non hanno ancora un ID: il presidente deve usare il menu Bowling → Genera ID mancanti.', 'err');
+  if (data.version !== VERSIONE_ATTESA) avvisaServerVecchio(data.version);  // dopo: l'avviso deve restare in fondo
   render();
 }
 
@@ -239,7 +274,7 @@ function render() {
   }
 
   $('trainings').innerHTML = aperti.map(t => {
-    const mine = me ? t.signups.find(s => s.userId === me.id) : null;
+    const mine = me ? (t.signups || []).find(s => s.userId === me.id) : null;
     let action;
     if (t.window === 'notYetOpen') {
       action = `<button disabled>Adesioni dal ${esc(t.opensAt)}</button>`;
