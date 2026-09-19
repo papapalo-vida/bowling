@@ -90,22 +90,57 @@ let timer = null;
 const $ = id => document.getElementById(id);
 const selectedMember = () => members.find(m => m.id === selectedId) || null;
 
+// Azioni che si possono ripetere senza danni se la prima chiamata si perde per strada.
+// "signup" è sicura perché il server risponde "già iscritto" invece di creare una seconda riga.
+// "cancel" NON si ripete: se la prima era andata a buon fine, la seconda darebbe un errore fuorviante.
+const RIPETIBILI = { members: true, status: true, signup: true, cancel: false };
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 async function api(action, payload = {}) {
+  try {
+    return await chiamata_(action, payload);
+  } catch (e) {
+    // Apps Script ogni tanto perde la richiesta e risponde 404 dal suo indirizzo
+    // interno (script.googleusercontent.com). Un secondo tentativo la recupera.
+    if (!e.transitorio || !RIPETIBILI[action]) throw e;
+    console.warn('Tentativo ripetuto per ' + action + ': ' + e.message);
+    await sleep(900);
+    return await chiamata_(action, payload);
+  }
+}
+
+async function chiamata_(action, payload) {
   // Richiesta GET con i parametri nell'indirizzo: è il formato che Apps Script
   // accetta senza complicazioni (niente preflight CORS, niente redirect su POST).
   const qs = new URLSearchParams({ action, ...payload, _: Date.now() });
-  const res = await fetch(API_URL + '?' + qs, { method: 'GET', cache: 'no-store' });
-  const text = await res.text();
-  let data;
+  let res, text;
   try {
-    data = JSON.parse(text);
-  } catch (e) {
+    res = await fetch(API_URL + '?' + qs, { method: 'GET', cache: 'no-store' });
+    text = await res.text();
+  } catch (netErr) {
+    console.error(netErr);
+    throw transitorio_('rete non raggiungibile');
+  }
+
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) { data = null; }
+
+  if (!data) {
     // Google ha risposto con una pagina HTML invece dei dati: mostriamo di che pagina si tratta
     console.error('Risposta non JSON da ' + API_URL, res.status, text.slice(0, 500));
-    throw new Error(diagnose_(res, text));
+    const msg = diagnose_(res, text);
+    throw isTransitorio_(res, text) ? transitorio_(msg) : new Error(msg);
   }
   if (!data.ok) throw new Error(data.error || 'Errore sconosciuto');
   return data;
+}
+
+function transitorio_(msg) { const e = new Error(msg); e.transitorio = true; return e; }
+
+/** Guasti passeggeri: ha senso riprovare. Un URL sbagliato invece è definitivo. */
+function isTransitorio_(res, text) {
+  return res.status === 404 || res.status >= 500 || text.toLowerCase().includes('moved temporarily');
 }
 
 /** Traduce in italiano la pagina HTML restituita da Google. */
@@ -116,8 +151,8 @@ function diagnose_(res, text) {
   if (t.includes('script function not found'))
     return 'La versione pubblicata è vecchia: Gestisci deployment → Nuova versione.';
   if (t.includes('moved temporarily') || res.status === 404)
-    return 'URL non valido (HTTP ' + res.status + '): controlla API_URL, deve essere quello attivo e finire con /exec.';
-  return 'Risposta inattesa dal server (HTTP ' + res.status + '). Dettagli nella console del browser.';
+    return 'il server Google non ha risposto (HTTP ' + res.status + '). Se capita di rado è un intoppo passeggero; se capita sempre controlla API_URL, deve essere il deployment attivo e finire con /exec.';
+  return 'risposta inattesa dal server (HTTP ' + res.status + '). Dettagli nella console del browser.';
 }
 
 function showMsg(text, kind = 'ok') {
@@ -166,7 +201,12 @@ $('memberSelect').addEventListener('change', () => {
 });
 
 // ============ ALLENAMENTI ============
-async function refresh() {
+/**
+ * Rilegge lo stato dal server.
+ * `silenzioso` = un aggiornamento automatico: se fallisce lo scrive solo in fondo,
+ * senza cancellare il messaggio dell'operazione appena fatta dal socio.
+ */
+async function refresh(silenzioso) {
   if (busy) return;
   try {
     const data = await api('status');
@@ -174,7 +214,9 @@ async function refresh() {
     render();
     $('updated').textContent = 'Aggiornato alle ' + data.serverTime.slice(11);
   } catch (e) {
-    showMsg('Connessione non riuscita: ' + e.message, 'err');
+    console.error(e);
+    if (silenzioso) $('updated').textContent = 'Aggiornamento non riuscito — premi Aggiorna';
+    else showMsg('Connessione non riuscita: ' + e.message, 'err');
   }
 }
 
@@ -238,6 +280,9 @@ $('trainings').addEventListener('click', async ev => {
   busy = true;
   btn.disabled = true;
   btn.textContent = 'Invio in corso…';
+  // La tendina resta bloccata finché il server non risponde: cambiare socio a metà
+  // operazione manderebbe l'adesione a nome di uno e il messaggio a nome di un altro.
+  $('memberSelect').disabled = true;
   try {
     const data = await api(joinDate ? 'signup' : 'cancel',
       { memberId: me.id, date: joinDate || cancelDate });
@@ -246,15 +291,21 @@ $('trainings').addEventListener('click', async ev => {
     $('memberSelect').value = '';
     updateWho();
   } catch (e) {
-    showMsg(e.message, 'err');
+    showMsg('Operazione non riuscita: ' + e.message, 'err');
   } finally {
     busy = false;
-    refresh();
+    $('memberSelect').disabled = false;
+    // Ridisegno subito con i dati che ho già: così il pulsante non resta
+    // bloccato su "Invio in corso…" se l'aggiornamento successivo non riesce.
+    render();
+    // Piccola pausa prima di rileggere: due richieste attaccate una all'altra
+    // sono proprio la situazione in cui Apps Script perde la seconda.
+    setTimeout(() => refresh(true), 800);
   }
 });
 
-$('refreshBtn').addEventListener('click', () => { clearMsg(); refresh(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+$('refreshBtn').addEventListener('click', () => { clearMsg(); refresh(false); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -266,8 +317,8 @@ if (API_URL.startsWith('INCOLLA')) {
   showMsg('App non configurata: inserire API_URL in index.html.', 'err');
 } else {
   loadMembers();
-  refresh();
-  timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
+  refresh(false);
+  timer = setInterval(() => { if (!document.hidden) refresh(true); }, REFRESH_MS);
 }
 </script>
 </body>

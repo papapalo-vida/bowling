@@ -2,7 +2,7 @@
 // I dati (adesioni) arrivano sempre dalla rete, mai dalla cache.
 // Cambiare il numero di versione a ogni modifica di index.html: al primo avvio
 // successivo la vecchia cache viene buttata via e i soci vedono la versione nuova.
-const CACHE = 'bowling-v3';
+const CACHE = 'bowling-v4';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {
