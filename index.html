@@ -20,6 +20,7 @@
   header .who { font-size:.9rem; opacity:.85; margin-top:2px; }
   main { max-width:520px; margin:0 auto; padding:16px; }
   .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:14px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .card.picker { border:2px solid var(--brand); }
   .row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
   .date { font-weight:700; font-size:1.05rem; }
   .sub { color:var(--muted); font-size:.88rem; margin-top:2px; }
@@ -38,43 +39,37 @@
   .msg { padding:12px 14px; border-radius:10px; margin-bottom:14px; font-weight:600; }
   .msg.ok { background:#e7f5ec; color:#145c2e; }
   .msg.err { background:#fdecec; color:#8f1d1d; }
-  label { display:block; font-weight:600; margin:12px 0 6px; }
-  select, input { width:100%; font:inherit; padding:11px; border:1px solid #c7ced6; border-radius:10px; background:#fff; }
+  label { display:block; font-weight:600; margin:0 0 6px; }
+  select { width:100%; font:inherit; padding:12px; border:1px solid #c7ced6; border-radius:10px; background:#fff; }
   .link { background:none; color:var(--muted); font-weight:500; text-decoration:underline; padding:6px; }
   .hidden { display:none; }
   .foot { text-align:center; color:var(--muted); font-size:.8rem; margin-top:8px; }
+  .badge { display:inline-block; font-size:.78rem; font-weight:700; color:var(--brand);
+           background:#e8eef6; border-radius:6px; padding:2px 7px; margin-top:6px; }
 </style>
 </head>
 <body>
 <header>
   <h1>🎳 Allenamenti Bowling</h1>
-  <div class="who" id="who"></div>
+  <div class="who" id="who">Scegli il socio, poi aderisci</div>
 </header>
 
 <main>
   <div id="msg" class="msg hidden"></div>
 
-  <!-- CONFIGURAZIONE -->
-  <section id="setup" class="card hidden">
-    <div class="date">Configurazione</div>
-    <div class="sub">Seleziona il tuo nome dall'elenco soci. L'operazione si fa una sola volta su questo telefono.</div>
-    <label for="memberSelect">Il tuo nome</label>
+  <!-- SCELTA DEL SOCIO: si rifà a ogni adesione -->
+  <section class="card picker">
+    <label for="memberSelect">Chi aderisce?</label>
     <select id="memberSelect"><option value="">Caricamento…</option></select>
-    <div id="pinBox" class="hidden">
-      <label for="pin">PIN (fornito dal presidente)</label>
-      <input id="pin" inputmode="numeric" autocomplete="off">
-    </div>
-    <button class="btn-join" id="activateBtn">Conferma</button>
-    <div class="foot" id="apiInfo"></div>
+    <div class="sub" id="pickerHint">La tendina si azzera dopo ogni operazione: per iscrivere una seconda persona basta sceglierla e aderire di nuovo.</div>
   </section>
 
   <!-- ALLENAMENTI -->
   <section id="trainings"></section>
 
-  <div id="footer" class="foot hidden">
+  <div id="footer" class="foot">
     <div id="updated"></div>
     <button class="link" id="refreshBtn">Aggiorna</button>
-    <button class="link" id="logoutBtn">Cambia utente su questo telefono</button>
   </div>
 </main>
 
@@ -83,23 +78,17 @@
 // Incolla qui l'URL della web app Apps Script (termina con /exec)
 const API_URL = 'https://script.google.com/macros/s/AKfycbyj2WBN2apOS_LwZnVCeYVAHe4AAhp-8yeF7_0_vQBgDYEfqzlOd-iaPDoJkxbXR4Jtrw/exec';
 const REFRESH_MS = 45000;
-const STORE_KEY = 'bowling.user';
 
 // ============ STATO ============
-let user = loadUser();
-let members = [];
+// Nessun dato viene salvato sul telefono: l'app è indipendente dal dispositivo.
+let members = [];      // elenco soci attivi
+let trainings = [];    // ultimo stato ricevuto dal server
+let selectedId = '';   // socio scelto in questo momento
 let busy = false;
 let timer = null;
 
 const $ = id => document.getElementById(id);
-
-function loadUser() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { return null; }
-}
-function saveUser(u) {
-  try { u ? localStorage.setItem(STORE_KEY, JSON.stringify(u)) : localStorage.removeItem(STORE_KEY); } catch (e) {}
-  user = u;
-}
+const selectedMember = () => members.find(m => m.id === selectedId) || null;
 
 async function api(action, payload = {}) {
   // Richiesta GET con i parametri nell'indirizzo: è il formato che Apps Script
@@ -125,7 +114,7 @@ function diagnose_(res, text) {
   if (t.includes('accounts.google.com') || t.includes('sign in') || t.includes('accedi'))
     return 'Il deployment chiede l\'accesso a Google: imposta "Chi ha accesso: Chiunque" e ripubblica.';
   if (t.includes('script function not found'))
-    return 'La versione pubblicata è vecchia (manca doPost): Gestisci deployment → Nuova versione.';
+    return 'La versione pubblicata è vecchia: Gestisci deployment → Nuova versione.';
   if (t.includes('moved temporarily') || res.status === 404)
     return 'URL non valido (HTTP ' + res.status + '): controlla API_URL, deve essere quello attivo e finire con /exec.';
   return 'Risposta inattesa dal server (HTTP ' + res.status + '). Dettagli nella console del browser.';
@@ -139,104 +128,77 @@ function showMsg(text, kind = 'ok') {
 }
 function clearMsg() { $('msg').className = 'msg hidden'; }
 
-// ============ CONFIGURAZIONE UTENTE ============
-async function showSetup() {
-  $('setup').classList.remove('hidden');
-  $('apiInfo').textContent = 'Server: …' + API_URL.slice(-18);
-  $('trainings').innerHTML = '';
-  $('footer').classList.add('hidden');
-  $('who').textContent = '';
+// ============ TENDINA SOCI ============
+async function loadMembers() {
+  const sel = $('memberSelect');
   try {
     const data = await api('members');
     members = data.members;
-    const sel = $('memberSelect');
     if (!members.length) {
       sel.innerHTML = '<option value="">— nessun socio —</option>';
       return showMsg('L\'elenco soci è vuoto: il presidente deve inserire i nomi nella scheda "Soci" del foglio.', 'err');
     }
-    sel.innerHTML = '<option value="">— seleziona —</option>' + members.map(m =>
-      `<option value="${esc(m.id)}" ${m.claimed ? 'disabled' : ''}>${esc(m.name)} (${esc(m.id)})${m.claimed ? ' – già attivato' : ''}</option>`
-    ).join('');
+    fillSelect();
   } catch (e) {
+    sel.innerHTML = '<option value="">— elenco non disponibile —</option>';
     showMsg('Impossibile caricare l\'elenco soci: ' + e.message, 'err');
   }
 }
 
+function fillSelect() {
+  const sel = $('memberSelect');
+  sel.innerHTML = '<option value="">— scegli il socio —</option>' + members.map(m =>
+    `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.id)})</option>`
+  ).join('');
+  sel.value = selectedId;
+}
+
+function updateWho() {
+  const m = selectedMember();
+  $('who').textContent = m ? `Stai operando come ${m.name} · ${m.id}` : 'Scegli il socio, poi aderisci';
+}
+
 $('memberSelect').addEventListener('change', () => {
-  const m = members.find(x => x.id === $('memberSelect').value);
-  $('pinBox').classList.toggle('hidden', !(m && m.pinRequired));
-});
-
-$('activateBtn').addEventListener('click', async () => {
-  const memberId = $('memberSelect').value;
-  if (!memberId) return showMsg('Seleziona il tuo nome.', 'err');
-  const btn = $('activateBtn');
-  btn.disabled = true;
-  try {
-    const data = await api('activate', { memberId, pin: $('pin').value });
-    saveUser({ id: data.member.id, name: data.member.name, token: data.token });
-    $('setup').classList.add('hidden');
-    showMsg('Configurazione completata. Benvenuto ' + data.member.name + '!');
-    startMain();
-  } catch (e) {
-    showMsg(e.message, 'err');
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-$('logoutBtn').addEventListener('click', () => {
-  if (!confirm('Scollegare questo telefono? Per riattivare il tuo nome dovrai chiedere al presidente di azzerare l\'attivazione.')) return;
-  saveUser(null);
-  stopTimer();
+  selectedId = $('memberSelect').value;
   clearMsg();
-  showSetup();
+  updateWho();
+  render();
 });
 
 // ============ ALLENAMENTI ============
-function startMain() {
-  $('who').textContent = `${user.name} · ${user.id}`;
-  $('footer').classList.remove('hidden');
-  refresh();
-  stopTimer();
-  timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
-}
-function stopTimer() { if (timer) clearInterval(timer); timer = null; }
-
 async function refresh() {
   if (busy) return;
   try {
-    const data = await api('status', { memberId: user.id, token: user.token });
-    if (data.revoked) {
-      saveUser(null);
-      stopTimer();
-      showMsg('Il tuo dispositivo non è più autorizzato. Ripeti la configurazione.', 'err');
-      return showSetup();
-    }
-    render(data.trainings);
+    const data = await api('status');
+    trainings = data.trainings;
+    render();
     $('updated').textContent = 'Aggiornato alle ' + data.serverTime.slice(11);
   } catch (e) {
     showMsg('Connessione non riuscita: ' + e.message, 'err');
   }
 }
 
-function render(trainings) {
+function render() {
+  const me = selectedMember();
   if (!trainings.length) {
     $('trainings').innerHTML = '<div class="card">Nessun allenamento in programma.</div>';
     return;
   }
   $('trainings').innerHTML = trainings.map(t => {
+    const mine = me ? t.signups.find(s => s.userId === me.id) : null;
     let action;
     if (t.window === 'notYetOpen') {
-      action = `<button disabled>Adesioni dal ${esc(t.opensAt.slice(0, 10))}</button>`;
+      action = `<button disabled>Adesioni dal ${esc(t.opensAt)}</button>`;
     } else if (t.window === 'closed') {
       action = `<button disabled>Adesioni chiuse</button>`;
-    } else if (t.myNumber) {
-      action = `<button class="btn-cancel" data-cancel="${t.date}" data-label="${t.label}">Annulla adesione</button>`;
+    } else if (!me) {
+      action = `<button disabled>Scegli prima il socio</button>`;
+    } else if (mine) {
+      action = `<button class="btn-cancel" data-cancel="${esc(t.date)}" data-label="${esc(t.label)}">Annulla l'adesione di ${esc(me.name)}</button>`;
     } else if (t.count >= t.max) {
       action = `<button disabled>Posti esauriti</button>`;
     } else {
-      action = `<button class="btn-join" data-join="${t.date}">Aderisci</button>`;
+      action = `<button class="btn-join" data-join="${esc(t.date)}" data-label="${esc(t.label)}">Aderisci come ${esc(me.name)}</button>`;
     }
     return `
       <div class="card">
@@ -245,12 +207,13 @@ function render(trainings) {
             <div class="date">${esc(t.weekday)} ${esc(t.label)}</div>
             <div class="sub">Adesioni</div>
             <div class="count">${t.count} <small>/ ${t.max}</small></div>
+            ${t.window === 'open' && t.customOpening ? '<div class="badge">apertura anticipata</div>' : ''}
           </div>
-          <div class="light ${t.light}" aria-label="semaforo ${t.light}">
+          <div class="light ${esc(t.light)}" aria-label="semaforo ${esc(t.light)}">
             <span class="r"></span><span class="y"></span><span class="g"></span>
           </div>
         </div>
-        ${t.myNumber ? `<div class="mine">Sei iscritto: numero ${t.myNumber}</div>` : ''}
+        ${mine ? `<div class="mine">${esc(me.name)} è iscritto: numero ${mine.number}</div>` : ''}
         ${action}
       </div>`;
   }).join('');
@@ -262,15 +225,26 @@ $('trainings').addEventListener('click', async ev => {
   const joinDate = btn.dataset.join;
   const cancelDate = btn.dataset.cancel;
   if (!joinDate && !cancelDate) return;
-  if (cancelDate && !confirm(`Annullare l'adesione all'allenamento del ${btn.dataset.label}?`)) return;
+
+  const me = selectedMember();
+  if (!me) return showMsg('Scegli prima il socio dalla tendina.', 'err');
+
+  // Conferma con il nome bene in vista: è la difesa contro l'adesione fatta per la persona sbagliata.
+  const domanda = joinDate
+    ? `Confermi l'adesione di ${me.name} (${me.id}) all'allenamento del ${btn.dataset.label}?`
+    : `Annullare l'adesione di ${me.name} (${me.id}) all'allenamento del ${btn.dataset.label}?`;
+  if (!confirm(domanda)) return;
 
   busy = true;
   btn.disabled = true;
   btn.textContent = 'Invio in corso…';
   try {
     const data = await api(joinDate ? 'signup' : 'cancel',
-      { memberId: user.id, token: user.token, date: joinDate || cancelDate });
+      { memberId: me.id, date: joinDate || cancelDate });
     showMsg(data.message, 'ok');
+    selectedId = '';           // il turno passa alla persona successiva
+    $('memberSelect').value = '';
+    updateWho();
   } catch (e) {
     showMsg(e.message, 'err');
   } finally {
@@ -280,7 +254,7 @@ $('trainings').addEventListener('click', async ev => {
 });
 
 $('refreshBtn').addEventListener('click', () => { clearMsg(); refresh(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && user) refresh(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -290,10 +264,10 @@ function esc(s) {
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (API_URL.startsWith('INCOLLA')) {
   showMsg('App non configurata: inserire API_URL in index.html.', 'err');
-} else if (user && user.token) {
-  startMain();
 } else {
-  showSetup();
+  loadMembers();
+  refresh();
+  timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
 }
 </script>
 </body>

@@ -1,6 +1,8 @@
 // Service worker minimo: rende l'app installabile e mette in cache solo la "scocca".
 // I dati (adesioni) arrivano sempre dalla rete, mai dalla cache.
-const CACHE = 'bowling-v2';
+// Cambiare il numero di versione a ogni modifica di index.html: al primo avvio
+// successivo la vecchia cache viene buttata via e i soci vedono la versione nuova.
+const CACHE = 'bowling-v3';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {
